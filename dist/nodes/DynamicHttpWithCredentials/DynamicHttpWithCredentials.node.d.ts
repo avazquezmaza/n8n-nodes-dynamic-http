@@ -33,6 +33,8 @@ export declare class DynamicHttpWithCredentials implements INodeType {
     private static readonly BEARER_TOKEN_REGEX;
     private static readonly LONG_TOKEN_REGEX;
     private static readonly URL_PATTERNS;
+    private static readonly API_KEY_REGEX;
+    private static readonly SECRET_REGEX;
     private static readonly COMMON_WORDS_SET;
     private sanitizeLogMessage;
     /**
@@ -65,7 +67,7 @@ export declare class DynamicHttpWithCredentials implements INodeType {
      * Checks if a string looks like an n8n credential ID
      * OPTIMIZED: Fast validation for credential IDs
      * n8n credential IDs are alphanumeric strings of 16-20 characters
-     * Examples: p3eWWKsNmr7mcrOA (16), JiOpJfJgAJzkH04U (16)
+     * Examples: AbCdEfGhIjKlMnOp (16), XyZaBcDeFgHiJkLm (16)
      */
     protected static isLikelyCredentialId(value: string): boolean;
     /**

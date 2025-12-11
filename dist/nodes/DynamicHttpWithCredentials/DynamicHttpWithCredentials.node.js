@@ -30,6 +30,7 @@ catch (e) {
 // Constants
 // ============================================================================
 const DEFAULT_TIMEOUT = 300000; // 5 minutes (300000ms) as per requirements
+const MAX_TIMEOUT = 600000; // 10 minutes maximum for security
 const DEFAULT_RETRY_ATTEMPTS = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 1000;
 const VALID_HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
@@ -45,6 +46,77 @@ const DEFAULT_HEADERS = {
     'Accept': 'application/json; charset=utf-8',
 };
 const DEFAULT_COMPANY_NAME = 'N/A';
+// Security limits
+const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB maximum body size
+const MAX_CREDENTIAL_NAME_LENGTH = 255; // Maximum credential name length
+const MIN_CREDENTIAL_NAME_LENGTH = 1; // Minimum credential name length
+const CREDENTIAL_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/; // Alphanumeric, underscore, hyphen only
+// ============================================================================
+// Security Functions
+// ============================================================================
+/**
+ * Validates that a URL is safe to use (prevents SSRF attacks)
+ * Blocks:
+ * - localhost and variants
+ * - Private IP ranges (RFC 1918)
+ * - Cloud metadata endpoints
+ * - Non-HTTP/HTTPS protocols
+ *
+ * @param url - The URL to validate
+ * @returns true if the URL is safe, false otherwise
+ */
+function isValidUrl(url) {
+    try {
+        const parsed = new URL(url);
+        const hostname = parsed.hostname.toLowerCase();
+        // 1. Only allow HTTP and HTTPS protocols
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return false;
+        }
+        // 2. Block localhost and variants
+        const blockedHosts = [
+            'localhost',
+            '127.0.0.1',
+            '0.0.0.0',
+            '::1',
+            '[::1]'
+        ];
+        if (blockedHosts.includes(hostname)) {
+            return false;
+        }
+        // 3. Block private IP ranges (RFC 1918)
+        // 10.0.0.0/8
+        if (/^10\./.test(hostname)) {
+            return false;
+        }
+        // 172.16.0.0/12
+        if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)) {
+            return false;
+        }
+        // 192.168.0.0/16
+        if (/^192\.168\./.test(hostname)) {
+            return false;
+        }
+        // 4. Block cloud metadata endpoints
+        // AWS, GCP, Azure: 169.254.169.254
+        if (/^169\.254\.169\.254/.test(hostname)) {
+            return false;
+        }
+        // 5. Block link-local addresses (169.254.0.0/16)
+        if (/^169\.254\./.test(hostname)) {
+            return false;
+        }
+        // 6. Block multicast addresses (224.0.0.0/4)
+        if (/^22[4-9]\.|^23[0-9]\./.test(hostname)) {
+            return false;
+        }
+        return true;
+    }
+    catch {
+        // Invalid URL format
+        return false;
+    }
+}
 // ============================================================================
 // Main Node Class
 // ============================================================================
@@ -192,9 +264,10 @@ class DynamicHttpWithCredentials {
                             type: 'number',
                             typeOptions: {
                                 minValue: 1,
+                                maxValue: MAX_TIMEOUT,
                             },
                             default: DEFAULT_TIMEOUT,
-                            description: 'Time in ms to wait for the remote server to respond',
+                            description: `Time in ms to wait for the remote server to respond (max: ${MAX_TIMEOUT / 1000 / 60} minutes)`,
                         },
                         {
                             displayName: 'Retry',
@@ -239,6 +312,14 @@ class DynamicHttpWithCredentials {
         };
     }
     sanitizeLogMessage(message) {
+        // Replace API keys
+        message = message.replace(DynamicHttpWithCredentials.API_KEY_REGEX, (_match, keyName, keyValue) => {
+            return `${keyName}: ${keyValue.substring(0, 4)}******${keyValue.substring(keyValue.length - 4)}`;
+        });
+        // Replace secrets/passwords/tokens
+        message = message.replace(DynamicHttpWithCredentials.SECRET_REGEX, (_match, secretName, secretValue) => {
+            return `${secretName}: ******`;
+        });
         // Replace credential IDs (16-20 character alphanumeric strings)
         message = message.replace(DynamicHttpWithCredentials.CREDENTIAL_ID_REGEX, (match, _fullMatch, offset) => {
             const before = message.substring(Math.max(0, offset - 20), offset);
@@ -299,13 +380,34 @@ class DynamicHttpWithCredentials {
             return data.map(item => this.sanitizeData(item));
         }
         const sanitized = {};
-        const sensitiveKeys = new Set(['value', 'token', 'password', 'secret', 'key', 'credential', 'authorization', 'bearer']);
+        const sensitiveKeys = new Set([
+            'value', 'token', 'password', 'secret', 'key', 'credential', 'authorization', 'bearer',
+            'apikey', 'api_key', 'api-key', 'access_token', 'access-token', 'refresh_token', 'refresh-token',
+            'private_key', 'private-key', 'privatekey', 'public_key', 'public-key', 'publickey',
+            'passphrase', 'pass-phrase', 'passphrase', 'session', 'sessionid', 'session_id',
+            'cookie', 'cookies', 'auth', 'authentication', 'jwt', 'oauth'
+        ]);
         for (const key in data) {
             const lowerKey = key.toLowerCase();
             const isSensitive = Array.from(sensitiveKeys).some(sk => lowerKey.includes(sk));
             const value = data[key];
-            if (isSensitive && typeof value === 'string' && value.length > 10) {
-                sanitized[key] = '***';
+            if (isSensitive) {
+                if (typeof value === 'string' && value.length > 0) {
+                    // Mask strings of any length (not just > 10)
+                    if (value.length <= 4) {
+                        sanitized[key] = '****';
+                    }
+                    else {
+                        sanitized[key] = value.substring(0, 2) + '******' + value.substring(value.length - 2);
+                    }
+                }
+                else if (typeof value === 'object' && value !== null) {
+                    // Recursively sanitize nested objects
+                    sanitized[key] = this.sanitizeData(value);
+                }
+                else {
+                    sanitized[key] = '***';
+                }
             }
             else if (typeof value === 'object' && value !== null) {
                 sanitized[key] = this.sanitizeData(value);
@@ -550,7 +652,7 @@ class DynamicHttpWithCredentials {
      * Checks if a string looks like an n8n credential ID
      * OPTIMIZED: Fast validation for credential IDs
      * n8n credential IDs are alphanumeric strings of 16-20 characters
-     * Examples: p3eWWKsNmr7mcrOA (16), JiOpJfJgAJzkH04U (16)
+     * Examples: AbCdEfGhIjKlMnOp (16), XyZaBcDeFgHiJkLm (16)
      */
     static isLikelyCredentialId(value) {
         if (!value || typeof value !== 'string') {
@@ -928,8 +1030,21 @@ class DynamicHttpWithCredentials {
                 if (!credentialName || credentialName.trim() === '') {
                     throw new Error(`[Item ${i + 1}] credentialName is required. Provide it in node config or item data (e.g., {{ $json.credentialName }}).`);
                 }
+                // Security: Validate credential name format and length
+                const trimmedCredentialName = credentialName.trim();
+                if (trimmedCredentialName.length < MIN_CREDENTIAL_NAME_LENGTH || trimmedCredentialName.length > MAX_CREDENTIAL_NAME_LENGTH) {
+                    throw new Error(`[Item ${i + 1}] credentialName must be between ${MIN_CREDENTIAL_NAME_LENGTH} and ${MAX_CREDENTIAL_NAME_LENGTH} characters.`);
+                }
+                if (!CREDENTIAL_NAME_PATTERN.test(trimmedCredentialName)) {
+                    throw new Error(`[Item ${i + 1}] credentialName contains invalid characters. Only alphanumeric characters, underscores, and hyphens are allowed.`);
+                }
                 if (!url || url.trim() === '') {
                     throw new Error(`[Item ${i + 1}] URL is required. Provide it in node config or item data (e.g., {{ $json.url }}).`);
+                }
+                // Security: Validate URL to prevent SSRF attacks
+                const trimmedUrl = url.trim();
+                if (!isValidUrl(trimmedUrl)) {
+                    throw new Error(`[Item ${i + 1}] URL is not allowed for security reasons. Only public HTTP/HTTPS URLs are permitted. Private IPs, localhost, and cloud metadata endpoints are blocked.`);
                 }
                 if (!VALID_HTTP_METHODS.includes(method)) {
                     throw new Error(`[Item ${i + 1}] Invalid HTTP method: ${method}`);
@@ -1006,15 +1121,24 @@ class DynamicHttpWithCredentials {
                     headerValue = `${BEARER_PREFIX}${headerValue}`;
                 }
                 headers[credName] = headerValue;
+                // Security: Validate timeout (prevent excessive timeouts)
+                const timeout = options.timeout || DEFAULT_TIMEOUT;
+                if (timeout < 1 || timeout > MAX_TIMEOUT) {
+                    throw new Error(`[Item ${i + 1}] Timeout must be between 1 and ${MAX_TIMEOUT}ms (${MAX_TIMEOUT / 1000 / 60} minutes).`);
+                }
                 // Build request options
                 const requestOptions = {
                     method: method,
                     headers: headers,
                     url: url,
                     json: true,
-                    timeout: options.timeout || DEFAULT_TIMEOUT,
+                    timeout: timeout,
                 };
                 if (METHODS_WITH_BODY.includes(method) && sendBody) {
+                    // Security: Validate body size (prevent DoS attacks)
+                    if (body && body.length > MAX_BODY_SIZE) {
+                        throw new Error(`[Item ${i + 1}] Body size (${body.length} bytes) exceeds maximum allowed size of ${MAX_BODY_SIZE} bytes (${MAX_BODY_SIZE / 1024 / 1024}MB).`);
+                    }
                     if (bodyContentType === 'json') {
                         try {
                             requestOptions.body = JSON.parse(body);
@@ -1071,7 +1195,7 @@ class DynamicHttpWithCredentials {
                     credentialName: credentialName,
                     timestamp: new Date().toISOString(),
                 };
-                // Preserve original input data for downstream processing (like Neevo Monitor pattern)
+                // Preserve original input data for downstream processing (optional - uncomment if needed)
                 //outputJson._originalInput = items[i].json as IDataObject[string];
                 returnData.push({
                     json: outputJson,
@@ -1123,6 +1247,9 @@ DynamicHttpWithCredentials.BEARER_TOKEN_REGEX = /Bearer\s+([A-Za-z0-9_-]{15,})/g
 DynamicHttpWithCredentials.LONG_TOKEN_REGEX = /\b([A-Za-z0-9_-]{25,})\b/g;
 // Pattern to detect URLs (generic, no hardcoded domains)
 DynamicHttpWithCredentials.URL_PATTERNS = /(http:\/\/|https:\/\/|:\/\/|\.com|\.org|\.net|\.io|\.ca|\.co|api\/v|\/api\/|\/v\d+\/)/i;
+// Additional patterns for sensitive data
+DynamicHttpWithCredentials.API_KEY_REGEX = /(api[_-]?key|apikey)\s*[:=]\s*([A-Za-z0-9_-]{20,})/gi;
+DynamicHttpWithCredentials.SECRET_REGEX = /(secret|password|token|key)\s*[:=]\s*([A-Za-z0-9_-]{15,})/gi;
 DynamicHttpWithCredentials.COMMON_WORDS_SET = new Set([
     'credentialshelper', 'getdecrypted', 'authorization', 'header', 'length', 'bearer',
     'content-type', 'accept-encoding', 'accept', 'processing', 'found', 'clearing',
