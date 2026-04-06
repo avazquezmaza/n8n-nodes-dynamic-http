@@ -2,8 +2,8 @@
 node_modules/
 package-lock.json
 
-# Build output - NO incluir dist/ si contiene información sensible
-# Si credentialMap.js tiene IDs reales, asegúrate de que dist/ esté ignorado
+# Compiled output — exclude only the credential map (may contain real IDs)
+# The rest of dist/ is committed so GitHub installs don't require a build server
 dist/credentialMap.js
 dist/credentialMap.d.ts
 

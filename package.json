@@ -11,17 +11,18 @@
     "multi-tenant"
   ],
   "license": "MIT",
-  "homepage": "https://github.com/your-org/n8n-nodes-dynamic-http",
+  "homepage": "https://github.com/avazquezmaza/n8n-nodes-dynamic-http",
   "author": {
-    "name": "Your Name",
-    "email": "your.email@example.com"
+    "name": "avazquez",
+    "email": "orchestrator.aws@trektel.com"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/n8n-nodes-dynamic-http.git"
+    "url": "https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
   },
   "main": "dist/nodes/DynamicHttpWithCredentials/DynamicHttpWithCredentials.node.js",
   "scripts": {
+    "prepare": "npm run build",
     "build": "tsc && gulp build:icons && npm run postbuild",
     "postbuild": "mkdir -p dist/nodes/DynamicHttpWithCredentials && mv dist/DynamicHttpWithCredentials.node.js dist/nodes/DynamicHttpWithCredentials/ 2>/dev/null || true && mv dist/DynamicHttpWithCredentials.node.d.ts dist/nodes/DynamicHttpWithCredentials/ 2>/dev/null || true && cp nodes/DynamicHttpWithCredentials/icon.svg dist/nodes/DynamicHttpWithCredentials/ 2>/dev/null || true",
     "dev": "tsc --watch",
@@ -55,5 +56,8 @@
   },
   "dependencies": {
     "n8n-workflow": "*"
+  },
+  "overrides": {
+    "form-data": ">=4.0.4"
   }
 }
