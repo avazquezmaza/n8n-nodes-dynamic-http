@@ -52,14 +52,13 @@ Each item processed by the node needs at minimum:
 
 ## Installation
 
-Run this command inside your n8n server or Docker container. npm will clone the repository and compile the TypeScript automatically via the `prepare` script.
+The `dist/` is pre-built and committed to the repository, so no compiler or Python is needed inside the container. Always use `--ignore-scripts` to skip native module compilation.
 
 ### Docker (single container)
 
 ```bash
-docker exec -it n8n sh
-npm install git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git
-exit
+docker exec -it -u root n8n sh -c \
+  "cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install --ignore-scripts git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
 docker restart n8n
 ```
 
@@ -70,11 +69,11 @@ If you run separate `n8n-main` and `n8n-worker` containers, you must install the
 ```bash
 # Install in main
 docker exec -it -u root n8n-main sh -c \
-  "cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
+  "cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install --ignore-scripts git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
 
 # Install in worker
 docker exec -it -u root n8n-worker sh -c \
-  "cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
+  "cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install --ignore-scripts git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
 
 # Restart both
 docker restart n8n-main n8n-worker
@@ -94,8 +93,12 @@ The node will appear in the node picker as **"HTTP Request (Dynamic Credentials)
 ### Update
 
 ```bash
-npm install git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git --force
-# Then restart n8n
+# Main + worker setup:
+docker exec -it -u root n8n-main sh -c \
+  "cd /home/node/.n8n/nodes && npm install --ignore-scripts git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
+docker exec -it -u root n8n-worker sh -c \
+  "cd /home/node/.n8n/nodes && npm install --ignore-scripts git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
+docker restart n8n-main n8n-worker
 ```
 
 ---
