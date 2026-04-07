@@ -22,7 +22,6 @@
   },
   "main": "dist/nodes/DynamicHttpWithCredentials/DynamicHttpWithCredentials.node.js",
   "scripts": {
-    "prepare": "npm run build",
     "build": "tsc && gulp build:icons && npm run postbuild",
     "postbuild": "mkdir -p dist/nodes/DynamicHttpWithCredentials && mv dist/DynamicHttpWithCredentials.node.js dist/nodes/DynamicHttpWithCredentials/ 2>/dev/null || true && mv dist/DynamicHttpWithCredentials.node.d.ts dist/nodes/DynamicHttpWithCredentials/ 2>/dev/null || true && cp nodes/DynamicHttpWithCredentials/icon.svg dist/nodes/DynamicHttpWithCredentials/ 2>/dev/null || true",
     "dev": "tsc --watch",
@@ -54,9 +53,7 @@
   "peerDependencies": {
     "n8n-workflow": "*"
   },
-  "dependencies": {
-    "n8n-workflow": "*"
-  },
+  "dependencies": {},
   "overrides": {
     "form-data": ">=4.0.4"
   }

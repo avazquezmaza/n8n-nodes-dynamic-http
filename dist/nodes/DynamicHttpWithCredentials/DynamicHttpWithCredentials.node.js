@@ -51,15 +51,57 @@ const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB maximum body size
 const MAX_CREDENTIAL_NAME_LENGTH = 255; // Maximum credential name length
 const MIN_CREDENTIAL_NAME_LENGTH = 1; // Minimum credential name length
 const CREDENTIAL_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/; // Alphanumeric, underscore, hyphen only
+// Header names that must never appear in error reports or logs
+const SENSITIVE_HEADERS = new Set([
+    'authorization',
+    'proxy-authorization',
+    'cookie',
+    'set-cookie',
+    'x-api-key',
+    'api-key',
+    'x-auth-token',
+    'x-access-token',
+]);
 // ============================================================================
 // Security Functions
 // ============================================================================
 /**
+ * Strips sensitive request headers (auth tokens, cookies, etc.) from an HTTP
+ * error object before it is passed to NodeApiError or written to any log.
+ *
+ * Many HTTP clients (got, axios) embed the full request config — including
+ * headers — inside the thrown Error object. Forwarding that raw error exposes
+ * credentials in n8n’s execution journal.
+ */
+function sanitizeHttpError(error) {
+    const err = error;
+    const safeError = new Error(err.message || 'HTTP request failed');
+    // Carry over only safe, displayable properties
+    const extra = {};
+    if (err.statusCode !== undefined)
+        extra.statusCode = err.statusCode;
+    if (err.code !== undefined)
+        extra.code = err.code;
+    if (err.response) {
+        extra.response = {
+            statusCode: err.response.statusCode,
+            statusMessage: err.response.statusMessage,
+            body: err.response.body,
+        };
+    }
+    Object.assign(safeError, extra);
+    return safeError;
+}
+/**
  * Validates that a URL is safe to use (prevents SSRF attacks)
  * Blocks:
  * - localhost and variants
+ * - Full loopback range 127.0.0.0/8
  * - Private IP ranges (RFC 1918)
- * - Cloud metadata endpoints
+ * - Cloud metadata endpoints (169.254.0.0/16)
+ * - Carrier-grade NAT (100.64.0.0/10)
+ * - IPv6 loopback, link-local, and unique-local ranges
+ * - IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
  * - Non-HTTP/HTTPS protocols
  *
  * @param url - The URL to validate
@@ -73,18 +115,19 @@ function isValidUrl(url) {
         if (!['http:', 'https:'].includes(parsed.protocol)) {
             return false;
         }
-        // 2. Block localhost and variants
-        const blockedHosts = [
-            'localhost',
-            '127.0.0.1',
-            '0.0.0.0',
-            '::1',
-            '[::1]'
-        ];
-        if (blockedHosts.includes(hostname)) {
+        // 2. Block localhost by name
+        if (hostname === 'localhost') {
             return false;
         }
-        // 3. Block private IP ranges (RFC 1918)
+        // 3. Block entire loopback range 127.0.0.0/8 (not just 127.0.0.1)
+        if (/^127\./.test(hostname)) {
+            return false;
+        }
+        // 4. Block unspecified/wildcard address
+        if (hostname === '0.0.0.0') {
+            return false;
+        }
+        // 5. Block private IP ranges (RFC 1918)
         // 10.0.0.0/8
         if (/^10\./.test(hostname)) {
             return false;
@@ -97,18 +140,44 @@ function isValidUrl(url) {
         if (/^192\.168\./.test(hostname)) {
             return false;
         }
-        // 4. Block cloud metadata endpoints
-        // AWS, GCP, Azure: 169.254.169.254
-        if (/^169\.254\.169\.254/.test(hostname)) {
-            return false;
-        }
-        // 5. Block link-local addresses (169.254.0.0/16)
+        // 6. Block link-local / cloud metadata (169.254.0.0/16)
         if (/^169\.254\./.test(hostname)) {
             return false;
         }
-        // 6. Block multicast addresses (224.0.0.0/4)
+        // 7. Block carrier-grade NAT (100.64.0.0/10 — 100.64–127.x)
+        if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(hostname)) {
+            return false;
+        }
+        // 8. Block multicast (224.0.0.0/4)
         if (/^22[4-9]\.|^23[0-9]\./.test(hostname)) {
             return false;
+        }
+        // 9. Handle IPv6 addresses (WHATWG URL wraps them in brackets)
+        const isIPv6 = hostname.startsWith('[') && hostname.endsWith(']');
+        const rawIpv6 = isIPv6 ? hostname.slice(1, -1) : hostname;
+        if (isIPv6) {
+            // Block IPv6 loopback (::1)
+            if (rawIpv6 === '::1') {
+                return false;
+            }
+            // Block IPv4-mapped IPv6 (::ffff:x.x.x.x) by re-validating extracted IPv4 part
+            const ipv4Mapped = rawIpv6.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i);
+            if (ipv4Mapped) {
+                // Recursively validate the embedded IPv4 address
+                return isValidUrl(`http://${ipv4Mapped[1]}/`);
+            }
+            // Block any remaining ::ffff: prefix (hex form, e.g. ::ffff:7f00:1)
+            if (/^::ffff:/i.test(rawIpv6)) {
+                return false;
+            }
+            // Block IPv6 link-local (fe80::/10)
+            if (/^fe[89ab][0-9a-f]:/i.test(rawIpv6)) {
+                return false;
+            }
+            // Block IPv6 unique-local (fc00::/7 — covers fc:: and fd::)
+            if (/^f[cd][0-9a-f]{2}:/i.test(rawIpv6)) {
+                return false;
+            }
         }
         return true;
     }
@@ -690,7 +759,7 @@ class DynamicHttpWithCredentials {
         if (!node || !node.credentials || !node.credentials[credentialType]) {
             return;
         }
-        if (originalCredId) {
+        if (originalCredId !== undefined) {
             node.credentials[credentialType].id = originalCredId;
         }
         else {
@@ -1016,6 +1085,7 @@ class DynamicHttpWithCredentials {
         }
         for (let i = 0; i < items.length; i++) {
             let originalCredId;
+            let credentialWasModified = false;
             try {
                 // Get parameters (use defaults if not item-specific)
                 const method = this.getNodeParameter('method', i, defaultMethod);
@@ -1067,6 +1137,7 @@ class DynamicHttpWithCredentials {
                         nodeCreds[DEFAULT_CREDENTIAL_TYPE] = {};
                     }
                     originalCredId = nodeCreds[DEFAULT_CREDENTIAL_TYPE].id;
+                    credentialWasModified = true;
                     // Only clear and wait if credential is actually changing
                     if (originalCredId !== credentialId) {
                         // Clear previous credential to ensure n8n updates
@@ -1135,9 +1206,12 @@ class DynamicHttpWithCredentials {
                     timeout: timeout,
                 };
                 if (METHODS_WITH_BODY.includes(method) && sendBody) {
-                    // Security: Validate body size (prevent DoS attacks)
-                    if (body && body.length > MAX_BODY_SIZE) {
-                        throw new Error(`[Item ${i + 1}] Body size (${body.length} bytes) exceeds maximum allowed size of ${MAX_BODY_SIZE} bytes (${MAX_BODY_SIZE / 1024 / 1024}MB).`);
+                    // Security: Validate body size in bytes (prevent DoS attacks).
+                    // Use Buffer.byteLength for accurate UTF-8 byte count rather than
+                    // String.length which counts code units, not bytes.
+                    const bodyByteLength = body ? Buffer.byteLength(body, 'utf8') : 0;
+                    if (bodyByteLength > MAX_BODY_SIZE) {
+                        throw new Error(`[Item ${i + 1}] Body size (${bodyByteLength} bytes) exceeds maximum allowed size of ${MAX_BODY_SIZE} bytes (${MAX_BODY_SIZE / 1024 / 1024}MB).`);
                     }
                     if (bodyContentType === 'json') {
                         try {
@@ -1174,9 +1248,11 @@ class DynamicHttpWithCredentials {
                             await new Promise(resolve => setTimeout(resolve, retryDelay));
                         }
                         else {
-                            // Pass error directly to NodeApiError (as in original code)
+                            // Sanitize before wrapping: strip request headers (auth tokens)
+                            // from the raw HTTP error so they never appear in n8n's
+                            // execution journal or error reports.
                             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                            const enhancedError = new n8n_workflow_1.NodeApiError(this.getNode(), error, {
+                            const enhancedError = new n8n_workflow_1.NodeApiError(this.getNode(), sanitizeHttpError(error), {
                                 message: `[Item ${i + 1}] HTTP Request failed after ${maxRetries + 1} attempts: ${err.message || 'Unknown error'}`,
                             });
                             throw enhancedError;
@@ -1220,9 +1296,16 @@ class DynamicHttpWithCredentials {
                 }
             }
             finally {
-                // OPTIMIZATION: Use cached nodeCreds instead of re-fetching
-                if (originalCredId !== undefined && nodeCreds?.[DEFAULT_CREDENTIAL_TYPE]) {
-                    nodeCreds[DEFAULT_CREDENTIAL_TYPE].id = originalCredId;
+                // Restore original credential state — must handle the case where
+                // originalCredId was undefined (no ID was set before we modified it).
+                if (credentialWasModified && nodeCreds?.[DEFAULT_CREDENTIAL_TYPE]) {
+                    if (originalCredId !== undefined) {
+                        nodeCreds[DEFAULT_CREDENTIAL_TYPE].id = originalCredId;
+                    }
+                    else {
+                        // We added an ID that wasn't there before — remove it
+                        delete nodeCreds[DEFAULT_CREDENTIAL_TYPE].id;
+                    }
                 }
             }
         }

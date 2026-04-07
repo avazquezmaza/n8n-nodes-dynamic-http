@@ -54,19 +54,33 @@ Each item processed by the node needs at minimum:
 
 Run this command inside your n8n server or Docker container. npm will clone the repository and compile the TypeScript automatically via the `prepare` script.
 
-### Docker
+### Docker (single container)
 
 ```bash
-# Open a shell inside the n8n container
 docker exec -it n8n sh
-
-# Install from GitHub
 npm install git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git
-
-# Exit and restart
 exit
 docker restart n8n
 ```
+
+### Docker Compose with main + worker containers
+
+If you run separate `n8n-main` and `n8n-worker` containers, you must install the node in **both** (workers execute nodes too):
+
+```bash
+# Install in main
+docker exec -it -u root n8n-main sh -c \
+  "cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
+
+# Install in worker
+docker exec -it -u root n8n-worker sh -c \
+  "cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-dynamic-http.git"
+
+# Restart both
+docker restart n8n-main n8n-worker
+```
+
+> **Persistence**: If your Docker Compose does not mount a volume for the `.n8n` directory, the installation will be lost when containers are recreated. The recommended solution is to add a shared volume in `docker-compose.yml` pointing to `/home/node/.n8n` so the `nodes/` folder survives restarts and redeployments.
 
 ### Bare-metal / local
 
